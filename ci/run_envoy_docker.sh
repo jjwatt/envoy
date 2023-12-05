@@ -17,6 +17,10 @@ export HTTPS_PROXY="${https_proxy:-}"
 export NO_PROXY="${no_proxy:-}"
 export GOPROXY="${go_proxy:-}"
 
+# This is what the original assumes gets mounted
+DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+ENVOY_DOCKER_SOCKET="${ENVOY_DOCKER_SOCKET:-"${DOCKER_HOST#unix://}"}"
+
 if is_windows; then
   [[ -z "${IMAGE_NAME}" ]] && IMAGE_NAME="envoyproxy/envoy-build-windows2019"
   # TODO(sunjayBhatia): Currently ENVOY_DOCKER_OPTIONS is ignored on Windows because
@@ -35,17 +39,27 @@ else
   # in useradd below, which is need for correct Python execution in the Docker
   # environment.
   ENVOY_DOCKER_OPTIONS+=(-u root:root)
-  ENVOY_DOCKER_OPTIONS+=(-v /var/run/docker.sock:/var/run/docker.sock)
+  # ENVOY_DOCKER_OPTIONS+=(-v /var/run/docker.sock:/var/run/docker.sock)
+  ENVOY_DOCKER_OPTIONS+=(-v "${ENVOY_DOCKER_SOCKET}:${ENVOY_DOCKER_SOCKET}")
   ENVOY_DOCKER_OPTIONS+=(--cap-add SYS_PTRACE --cap-add NET_RAW --cap-add NET_ADMIN)
   DEFAULT_ENVOY_DOCKER_BUILD_DIR=/tmp/envoy-docker-build
   BUILD_DIR_MOUNT_DEST=/build
   SOURCE_DIR="${PWD}"
   SOURCE_DIR_MOUNT_DEST=/source
+  # TODO(jjwatt): Only do this uid injection bullshit on docker. podman is ill enough to handle it, baby.
+  # may be able to make it work anyway with --cap-add CAP_CHOWN
+  # Actually, it doesn't seem like anything refers to the envoybuild user or group anywhere else.
+  # We can probably just unit it out for podman.
+  # This relies on START_COMMAND expanding id -g, etc on your host.
+  # TODO(jjwatt): cd can fail :'(
   START_COMMAND=("/bin/bash" "-lc" "groupadd --gid $(id -g) -f envoygroup \
     && useradd -o --uid $(id -u) --gid $(id -g) --no-create-home --home-dir /build envoybuild \
     && usermod -a -G pcap envoybuild \
     && chown envoybuild:envoygroup /build \
     && sudo -EHs -u envoybuild bash -c 'cd /source && $*'")
+  if [[ -n $JWTESTING ]]; then
+      export START_COMMAND=("/bin/bash" "-c" "cd /source && $*")
+  fi
 fi
 
 # The IMAGE_ID defaults to the CI hash but can be set to an arbitrary image ID (found with 'docker
@@ -63,8 +77,8 @@ mkdir -p "${ENVOY_DOCKER_BUILD_DIR}"
 export ENVOY_BUILD_IMAGE="${IMAGE_NAME}:${IMAGE_ID}"
 
 VOLUMES=(
-    -v "${ENVOY_DOCKER_BUILD_DIR}":"${BUILD_DIR_MOUNT_DEST}"
-    -v "${SOURCE_DIR}":"${SOURCE_DIR_MOUNT_DEST}")
+    -v "${ENVOY_DOCKER_BUILD_DIR}":"${BUILD_DIR_MOUNT_DEST}:Z"
+    -v "${SOURCE_DIR}":"${SOURCE_DIR_MOUNT_DEST}:Z")
 
 if ! is_windows; then
     # Create a "shared" directory that has the same path in/outside the container
@@ -75,13 +89,15 @@ if ! is_windows; then
     SHARED_TMP_DIR=/tmp/bazel-shared
     mkdir -p "${SHARED_TMP_DIR}"
     chmod +rwx "${SHARED_TMP_DIR}"
-    VOLUMES+=(-v "${SHARED_TMP_DIR}":"${SHARED_TMP_DIR}")
+    VOLUMES+=(-v "${SHARED_TMP_DIR}":"${SHARED_TMP_DIR}:Z")
 fi
 
 time docker pull "${ENVOY_BUILD_IMAGE}"
 
 
 # Since we specify an explicit hash, docker-run will pull from the remote repo if missing.
+echo "DEBUG: Volumes:"
+echo "${VOLUMES[@]}"
 docker run --rm \
        "${ENVOY_DOCKER_OPTIONS[@]}" \
        "${VOLUMES[@]}" \
