@@ -38,6 +38,11 @@ else
   # We run as root and later drop permissions. This is required to setup the USER
   # in useradd below, which is need for correct Python execution in the Docker
   # environment.
+  # NOTE(jjwatt): Podman handles this fine running rootless in userns as root.
+  # You should not need `--privledged`, either! If you need to give access to
+  # the user podman socket, start up the systemd user service, 'podman.socket',
+  # and you should get a $XDG_RUNTIME_DIR/podman/podman.sock.
+  # Set DOCKER_HOST to the podman sock, $XDG_RUNTIME_DIR/podman/podman.sock.
   ENVOY_DOCKER_OPTIONS+=(-u root:root)
   # ENVOY_DOCKER_OPTIONS+=(-v /var/run/docker.sock:/var/run/docker.sock)
   ENVOY_DOCKER_OPTIONS+=(-v "${ENVOY_DOCKER_SOCKET}:${ENVOY_DOCKER_SOCKET}")
@@ -47,16 +52,19 @@ else
   SOURCE_DIR="${PWD}"
   SOURCE_DIR_MOUNT_DEST=/source
   # TODO(jjwatt): Only do this uid injection bullshit on docker. podman is ill enough to handle it, baby.
-  # may be able to make it work anyway with --cap-add CAP_CHOWN
   # Actually, it doesn't seem like anything refers to the envoybuild user or group anywhere else.
   # We can probably just unit it out for podman.
+  # This is trash.
   # This relies on START_COMMAND expanding id -g, etc on your host.
-  # TODO(jjwatt): cd can fail :'(
+  # cd can fail :'(
   START_COMMAND=("/bin/bash" "-lc" "groupadd --gid $(id -g) -f envoygroup \
     && useradd -o --uid $(id -u) --gid $(id -g) --no-create-home --home-dir /build envoybuild \
     && usermod -a -G pcap envoybuild \
     && chown envoybuild:envoygroup /build \
     && sudo -EHs -u envoybuild bash -c 'cd /source && $*'")
+  # TODO(jjwatt): I'm not sure what putting us in the pcap group is for, but it *could* be why some tests
+  # seem to be failing in my build. Even though it runs as root, if the tests need that capability,
+  # then I probably need to add it as a cap the right way (instead of wtf they're doing here).
   if [[ -n $JWTESTING ]]; then
       export START_COMMAND=("/bin/bash" "-c" "cd /source && $*")
   fi
